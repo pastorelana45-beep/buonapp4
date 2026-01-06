@@ -1,0 +1,7 @@
+{
+  "name": "VocalSynthPro",
+  "description": "A professional-grade studio workstation that converts voice into MIDI in real-time using pitch detection and high-quality synthesis.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

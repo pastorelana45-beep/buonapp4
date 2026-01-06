@@ -1,0 +1,18 @@
+
+{
+  "name": "VocalSynthPro Studio",
+  "short_name": "VocalSynth",
+  "description": "Professional Voice-to-MIDI Workstation",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#a855f7",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/3659/3659792.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
