@@ -5,10 +5,117 @@ import {
   Activity, Disc, History, AudioWaveform, Clock, 
   ChevronRight, XCircle, Volume1, VolumeX, Layers, Mic2, Sparkles
 } from 'lucide-react';
-import { INSTRUMENTS } from './constants';
-import { Instrument, WorkstationMode, RecordedNote, StudioSession } from './types';
-import { detectPitch, frequencyToMidi, midiToNoteName } from './services/pitchDetection';
 import { GoogleGenerativeAI } from "@google/generative-ai";
+
+// --- TIPI E COSTANTI (Integrati per evitare errori di import) ---
+
+export enum WorkstationMode {
+  IDLE = 'IDLE',
+  MIDI = 'MIDI',
+  VOICE = 'VOICE',
+  RECORD = 'RECORD'
+}
+
+export interface Instrument {
+  id: string;
+  name: string;
+  category: string;
+}
+
+export interface RecordedNote {
+  note: string;
+  time: number;
+  duration: number;
+}
+
+export interface StudioSession {
+  id: string;
+  timestamp: number;
+  midiNotes: RecordedNote[];
+  audioUrl: string;
+  instrumentName: string;
+}
+
+const INSTRUMENTS: Instrument[] = [
+  { id: 'grand-piano', name: 'GRAND PIANO', category: 'PIANO' },
+  { id: 'rhodes-piano', name: 'RHODES PIANO', category: 'KEYS' },
+  { id: 'marimba', name: 'MARIMBA', category: 'PERC' },
+  { id: 'rock-organ', name: 'ROCK ORGAN', category: 'ORGAN' },
+  { id: 'nylon-guitar', name: 'NYLON GUITAR', category: 'GUITAR' },
+  { id: 'finger-bass', name: 'FINGER BASS', category: 'BASS' },
+  { id: 'strings-1', name: 'STRINGS 1', category: 'STRINGS' },
+  { id: 'saw-lead', name: 'SAW LEAD', category: 'SYNTH' },
+];
+
+// --- LOGICA DI RILEVAMENTO PITCH (Algoritmo YIN) ---
+
+function detectPitch(buffer: Float32Array, sampleRate: number): number | null {
+  const threshold = 0.15;
+  const SIZE = buffer.length;
+  const yinBuffer = new Float32Array(Math.floor(SIZE / 2));
+
+  for (let tau = 0; tau < yinBuffer.length; tau++) {
+    for (let i = 0; i < yinBuffer.length; i++) {
+      const delta = buffer[i] - buffer[i + tau];
+      yinBuffer[tau] += delta * delta;
+    }
+  }
+
+  yinBuffer[0] = 1;
+  let runningSum = 0;
+  for (let tau = 1; tau < yinBuffer.length; tau++) {
+    runningSum += yinBuffer[tau];
+    yinBuffer[tau] *= tau / (runningSum || 1);
+  }
+
+  let tau = -1;
+  for (let t = 1; t < yinBuffer.length; t++) {
+    if (yinBuffer[t] < threshold) {
+      tau = t;
+      break;
+    }
+  }
+
+  if (tau === -1) {
+    let minVal = 1;
+    for (let t = 1; t < yinBuffer.length; t++) {
+      if (yinBuffer[t] < minVal) {
+        minVal = yinBuffer[t];
+        tau = t;
+      }
+    }
+    if (minVal > 0.4) return null;
+  }
+
+  if (tau > 0 && tau < yinBuffer.length - 1) {
+    const s0 = yinBuffer[tau - 1];
+    const s1 = yinBuffer[tau];
+    const s2 = yinBuffer[tau + 1];
+    const denominator = 2 * (2 * s1 - s2 - s0);
+    if (denominator !== 0) {
+      const betterTau = tau + (s2 - s0) / denominator;
+      return sampleRate / betterTau;
+    }
+  }
+
+  return tau > 0 ? sampleRate / tau : null;
+}
+
+function frequencyToMidi(frequency: number): number {
+  if (!frequency || frequency <= 0) return 0;
+  return Math.round(69 + 12 * Math.log2(frequency / 440));
+}
+
+function midiToNoteName(midi: number): string {
+  if (midi === null || isNaN(midi)) return "--";
+  const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  const m = Math.round(midi);
+  const noteIndex = ((m % 12) + 12) % 12;
+  const octave = Math.floor(m / 12) - 1;
+  return notes[noteIndex] + octave;
+}
+
+// --- COMPONENTE PRINCIPALE APP ---
 
 const MIN_NOTE_DURATION = 0.05;
 
@@ -35,8 +142,8 @@ const App: React.FC = () => {
   const micRef = useRef<Tone.UserMedia | null>(null);
   const analyserRef = useRef<Tone.Analyser | null>(null);
   const recorderRef = useRef<Tone.Recorder | null>(null);
-  const playerRef = useRef<Tone.Player | null>(null);
   const voicePassthroughRef = useRef<Tone.Gain | null>(null);
+  const playerRef = useRef<Tone.Player | null>(null);
   
   const stateRef = useRef({ 
     mode: WorkstationMode.IDLE, 
@@ -64,22 +171,14 @@ const App: React.FC = () => {
     if (!synthRef.current) return;
     let settings: any = { oscillator: { type: 'triangle' }, envelope: { attack: 0.01, decay: 0.1, sustain: 0.5, release: 0.5 } };
     
-    switch (instrument.category) {
-      case 'PIANO':
-        settings = { oscillator: { type: 'triangle8' }, envelope: { attack: 0.005, decay: 0.2, sustain: 0.3, release: 1.2 } };
-        break;
-      case 'STRINGS':
-        settings = { oscillator: { type: 'sawtooth' }, envelope: { attack: 0.4, decay: 0.4, sustain: 0.8, release: 1.5 } };
-        break;
-      case 'SYNTH':
-        settings = { oscillator: { type: 'fatsawtooth', count: 3, spread: 30 }, envelope: { attack: 0.05, decay: 0.3, sustain: 0.4, release: 0.8 } };
-        break;
-      case 'BASS':
-        settings = { oscillator: { type: 'square' }, envelope: { attack: 0.01, decay: 0.1, sustain: 0.6, release: 0.2 } };
-        break;
-      case 'ORGAN':
-        settings = { oscillator: { type: 'sine' }, envelope: { attack: 0.01, decay: 0, sustain: 1, release: 0.1 } };
-        break;
+    if (instrument.category === 'PIANO' || instrument.category === 'KEYS') {
+      settings = { oscillator: { type: 'triangle8' }, envelope: { attack: 0.005, decay: 0.2, sustain: 0.3, release: 1.2 } };
+    } else if (instrument.category === 'STRINGS') {
+      settings = { oscillator: { type: 'sawtooth' }, envelope: { attack: 0.4, decay: 0.4, sustain: 0.8, release: 1.5 } };
+    } else if (instrument.category === 'SYNTH') {
+      settings = { oscillator: { type: 'fatsawtooth', count: 3, spread: 30 }, envelope: { attack: 0.05, decay: 0.3, sustain: 0.4, release: 0.8 } };
+    } else if (instrument.category === 'BASS') {
+      settings = { oscillator: { type: 'square' }, envelope: { attack: 0.01, decay: 0.1, sustain: 0.6, release: 0.2 } };
     }
     synthRef.current.set(settings);
   }, []);
@@ -89,7 +188,6 @@ const App: React.FC = () => {
       mode, isRecording, isPlayingBack: !!isPlayingBack, 
       lastMidi: currentMidiNote, sensitivity, micBoost, isMonitorOn
     };
-    
     if (synthRef.current) {
       const shouldMute = isRecording || !isMonitorOn || (mode !== WorkstationMode.MIDI && mode !== WorkstationMode.RECORD);
       synthRef.current.volume.value = shouldMute ? -Infinity : 0;
@@ -99,12 +197,10 @@ const App: React.FC = () => {
     }
   }, [mode, isRecording, isPlayingBack, currentMidiNote, sensitivity, micBoost, isMonitorOn]);
 
-  useEffect(() => { applyInstrumentSettings(selectedInstrument); }, [selectedInstrument, applyInstrumentSettings]);
-
   const initAudioCore = async () => {
     if (synthRef.current) return true;
     try {
-      await Tone.start(); // Sblocco cruciale
+      await Tone.start();
       const synth = new Tone.PolySynth(Tone.Synth).toDestination();
       const mic = new Tone.UserMedia();
       const analyser = new Tone.Analyser('waveform', 1024);
@@ -121,11 +217,10 @@ const App: React.FC = () => {
       analyserRef.current = analyser;
       recorderRef.current = recorder;
       voicePassthroughRef.current = passthrough;
-      
       applyInstrumentSettings(selectedInstrument);
       return true;
     } catch (err) {
-      console.error("Audio init error:", err);
+      console.error(err);
       return false;
     }
   };
@@ -133,72 +228,61 @@ const App: React.FC = () => {
   const audioLoop = () => {
     if (!analyserRef.current || !synthRef.current) return;
     const buffer = analyserRef.current.getValue() as Float32Array;
+    
     let sum = 0;
     for (let i = 0; i < buffer.length; i++) {
-      const boostedSample = buffer[i] * stateRef.current.micBoost;
-      sum += boostedSample * boostedSample;
+      const boosted = buffer[i] * stateRef.current.micBoost;
+      sum += boosted * boosted;
     }
     const rms = Math.sqrt(sum / buffer.length);
     setRmsVolume(prev => prev * 0.7 + rms * 0.3);
 
-    if (stateRef.current.isPlayingBack) {
-      requestAnimationFrame(audioLoop);
-      return;
-    }
+    if (!stateRef.current.isPlayingBack) {
+      const isMidiActive = stateRef.current.mode === WorkstationMode.MIDI || stateRef.current.mode === WorkstationMode.RECORD;
+      if (rms > stateRef.current.sensitivity && isMidiActive) {
+        const freq = detectPitch(buffer, Tone.getContext().sampleRate);
+        const midi = freq ? frequencyToMidi(freq) : null;
 
-    const currentMode = stateRef.current.mode;
-    const isMidiActive = currentMode === WorkstationMode.MIDI || currentMode === WorkstationMode.RECORD;
-
-    if (rms > stateRef.current.sensitivity && isMidiActive) {
-      const freq = detectPitch(buffer, Tone.getContext().sampleRate);
-      const midi = freq ? frequencyToMidi(freq) : null;
-
-      if (midi !== null && midi !== stateRef.current.lastMidi) {
-        const noteName = midiToNoteName(midi);
-        if (stateRef.current.lastMidi !== null) {
-          synthRef.current.triggerRelease(midiToNoteName(stateRef.current.lastMidi));
-          if (currentMode === WorkstationMode.RECORD && activeNoteStartRef.current) {
-            const duration = Tone.now() - recordingStartTimeRef.current - activeNoteStartRef.current.start;
-            if (duration >= MIN_NOTE_DURATION) {
-              recordingNotesRef.current.push({ note: activeNoteStartRef.current.note, time: activeNoteStartRef.current.time, duration });
-            }
+        if (midi !== null && midi !== stateRef.current.lastMidi) {
+          const noteName = midiToNoteName(midi);
+          if (stateRef.current.lastMidi !== null) {
+            synthRef.current.triggerRelease(midiToNoteName(stateRef.current.lastMidi));
+          }
+          synthRef.current.triggerAttack(noteName);
+          setCurrentMidiNote(midi);
+          
+          if (stateRef.current.mode === WorkstationMode.RECORD) {
+            const startTime = Tone.now() - recordingStartTimeRef.current;
+            activeNoteStartRef.current = { note: noteName, start: startTime, time: startTime };
           }
         }
-        synthRef.current.triggerAttack(noteName);
-        setCurrentMidiNote(midi);
-        if (currentMode === WorkstationMode.RECORD) {
-          const startTime = Tone.now() - recordingStartTimeRef.current;
-          activeNoteStartRef.current = { note: noteName, start: startTime, time: startTime };
+      } else if (stateRef.current.lastMidi !== null) {
+        synthRef.current.triggerRelease(midiToNoteName(stateRef.current.lastMidi));
+        if (stateRef.current.mode === WorkstationMode.RECORD && activeNoteStartRef.current) {
+          const duration = Tone.now() - recordingStartTimeRef.current - activeNoteStartRef.current.start;
+          if (duration >= MIN_NOTE_DURATION) {
+            recordingNotesRef.current.push({ ...activeNoteStartRef.current, duration });
+          }
+          activeNoteStartRef.current = null;
         }
+        setCurrentMidiNote(null);
       }
-    } else if (stateRef.current.lastMidi !== null) {
-      synthRef.current.triggerRelease(midiToNoteName(stateRef.current.lastMidi));
-      if (currentMode === WorkstationMode.RECORD && activeNoteStartRef.current) {
-        const duration = Tone.now() - recordingStartTimeRef.current - activeNoteStartRef.current.start;
-        if (duration >= MIN_NOTE_DURATION) {
-          recordingNotesRef.current.push({ note: activeNoteStartRef.current.note, time: activeNoteStartRef.current.time, duration });
-        }
-        activeNoteStartRef.current = null;
-      }
-      setCurrentMidiNote(null);
     }
     requestAnimationFrame(audioLoop);
   };
 
   const startSetupWizard = async () => {
     setIsConfiguring(true);
-    setSetupStep('PERMISSION');
     const success = await initAudioCore();
     if (success) {
       setSetupStep('COMPLETE');
       audioLoop();
     } else {
       setIsConfiguring(false);
-      alert("Microphone access denied.");
+      alert("Microphone Access Required");
     }
   };
 
-  // ... (Tutte le altre funzioni toggleRecording, playSessionMidi, etc rimangono uguali)
   const toggleRecording = async () => {
     if (!isRecording) {
       recordingNotesRef.current = [];
@@ -206,84 +290,27 @@ const App: React.FC = () => {
       recorderRef.current?.start();
       setIsRecording(true);
       setMode(WorkstationMode.RECORD);
-      setShowHistory(false);
     } else {
-      const audioBlob = await recorderRef.current?.stop();
-      if (!audioBlob) return;
-      const url = URL.createObjectURL(audioBlob);
-      if (activeNoteStartRef.current) {
-        const duration = Tone.now() - recordingStartTimeRef.current - activeNoteStartRef.current.start;
-        if (duration >= MIN_NOTE_DURATION) {
-          recordingNotesRef.current.push({ note: activeNoteStartRef.current.note, time: activeNoteStartRef.current.time, duration });
-        }
+      const blob = await recorderRef.current?.stop();
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        setSessions(prev => [{
+          id: Math.random().toString(36).substr(2, 9),
+          timestamp: Date.now(),
+          midiNotes: [...recordingNotesRef.current],
+          audioUrl: url,
+          instrumentName: selectedInstrument.name
+        }, ...prev]);
       }
-      setSessions(prev => [{
-        id: Math.random().toString(36).substr(2, 9),
-        timestamp: Date.now(),
-        midiNotes: [...recordingNotesRef.current],
-        audioUrl: url,
-        instrumentName: selectedInstrument.name
-      }, ...prev]);
       setIsRecording(false);
       setMode(WorkstationMode.IDLE);
       synthRef.current?.releaseAll();
-      setShowHistory(true);
     }
-  };
-
-  const stopAllPlayback = () => {
-    synthRef.current?.releaseAll();
-    playerRef.current?.stop();
-    setIsPlayingBack(null);
-  };
-
-  const playSessionMidi = (session: StudioSession) => {
-    if (isPlayingBack) stopAllPlayback();
-    applyInstrumentSettings(selectedInstrument);
-    setIsPlayingBack(session.id + "_midi");
-    const now = Tone.now();
-    session.midiNotes.forEach(n => {
-      synthRef.current?.triggerAttackRelease(n.note, n.duration, now + n.time);
-    });
-    const totalTime = Math.max(...session.midiNotes.map(n => n.time + n.duration), 2);
-    setTimeout(() => setIsPlayingBack(null), totalTime * 1000);
-  };
-
-  const playSessionAudio = (session: StudioSession) => {
-    if (isPlayingBack) stopAllPlayback();
-    setIsPlayingBack(session.id + "_audio");
-    const player = new Tone.Player({
-      url: session.audioUrl,
-      autostart: true,
-      onstop: () => { setIsPlayingBack(null); player.dispose(); }
-    }).toDestination();
-    playerRef.current = player;
-  };
-
-  const toggleVoiceMode = () => {
-    if (mode === WorkstationMode.VOICE) {
-      setMode(WorkstationMode.IDLE);
-    } else {
-      stopAllPlayback();
-      setMode(WorkstationMode.VOICE);
-    }
-  };
-
-  const fetchAiInsight = async () => {
-    setIsAiLoading(true);
-    try {
-      const apiKey = (import.meta as any).env?.VITE_API_KEY || "";
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-      const result = await model.generateContent(`Tips for playing ${selectedInstrument.name} with voice-to-midi`);
-      const resp = await result.response;
-      setAiInsight({ text: resp.text(), sources: [] });
-    } catch (e) { console.error(e); } finally { setIsAiLoading(false); }
   };
 
   return (
     <div className="fixed inset-0 bg-black text-white flex flex-col overflow-hidden font-sans select-none">
-      {/* Header, Main Content, Modals e Styles rimangono quelli che avevi */}
+      {/* Header */}
       <header className="px-6 py-4 flex justify-between items-center bg-zinc-950/80 backdrop-blur-md border-b border-white/5 z-50">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 bg-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-purple-900/20"><Music size={20} /></div>
@@ -304,25 +331,40 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {isStarted && <div className="w-full h-1 bg-zinc-900"><div className="h-full bg-purple-500 transition-all duration-75" style={{ width: `${Math.min(100, (rmsVolume / 0.3) * 100)}%` }} /></div>}
-
-      {isConfiguring && (
-        <div className="absolute inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center text-center animate-in fade-in">
-          <Mic size={48} className="text-purple-500 animate-pulse mb-6" />
-          <h3 className="text-2xl font-black uppercase mb-2">{setupStep}</h3>
-          {setupStep === 'COMPLETE' && (
-            <button onClick={() => { setIsConfiguring(false); setIsStarted(true); }} className="mt-10 px-10 bg-white text-black py-5 rounded-2xl font-black uppercase italic">Start Experience</button>
-          )}
+      {/* Volume Visualizer */}
+      {isStarted && (
+        <div className="w-full h-1 bg-zinc-900">
+          <div className="h-full bg-purple-500 transition-all duration-75" style={{ width: `${Math.min(100, (rmsVolume / 0.3) * 100)}%` }} />
         </div>
       )}
 
-      {isStarted && (
+      {/* Main App */}
+      {!isStarted ? (
+        <div className="absolute inset-0 z-[100] bg-black flex flex-col items-center justify-center p-10">
+          {!isConfiguring ? (
+            <>
+              <div className="w-24 h-24 bg-white text-black rounded-[2.2rem] flex items-center justify-center mb-10 rotate-3"><Music size={40} /></div>
+              <h2 className="text-5xl font-black mb-2 tracking-tighter uppercase italic leading-none text-center">Vocal<br/><span className="text-purple-500">Synth</span></h2>
+              <button onClick={startSetupWizard} className="w-full max-w-xs bg-white text-black py-7 rounded-[2rem] font-black text-xl flex items-center justify-center gap-3 mt-10">ENTER STUDIO <ChevronRight size={24} /></button>
+            </>
+          ) : (
+            <div className="flex flex-col items-center animate-pulse">
+              <Mic size={48} className="text-purple-500 mb-6" />
+              <h3 className="text-2xl font-black uppercase mb-10">{setupStep}</h3>
+              {setupStep === 'COMPLETE' && (
+                <button onClick={() => { setIsConfiguring(false); setIsStarted(true); }} className="px-10 bg-white text-black py-5 rounded-2xl font-black uppercase italic">Start Experience</button>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
         <main className="flex-1 flex flex-col px-5 pb-24 overflow-hidden">
+          {/* Controls */}
           <section className="grid grid-cols-3 gap-3 my-5 shrink-0">
-            <button onClick={() => { setMode(WorkstationMode.MIDI); stopAllPlayback(); }} className={`py-5 rounded-2xl flex flex-col items-center gap-2 border-2 transition-all ${mode === WorkstationMode.MIDI ? 'bg-purple-600 border-purple-600' : 'bg-zinc-900 border-transparent text-zinc-500'}`}>
+            <button onClick={() => setMode(WorkstationMode.MIDI)} className={`py-5 rounded-2xl flex flex-col items-center gap-2 border-2 transition-all ${mode === WorkstationMode.MIDI ? 'bg-purple-600 border-purple-600' : 'bg-zinc-900 border-transparent text-zinc-500'}`}>
               <Activity size={20} strokeWidth={3} /><span className="text-[8px] font-black tracking-widest">MIDI</span>
             </button>
-            <button onClick={toggleVoiceMode} className={`py-5 rounded-2xl flex flex-col items-center gap-2 border-2 transition-all ${mode === WorkstationMode.VOICE ? 'bg-blue-600 border-blue-600 shadow-lg' : 'bg-zinc-900 border-transparent text-zinc-500'}`}>
+            <button onClick={() => setMode(WorkstationMode.VOICE)} className={`py-5 rounded-2xl flex flex-col items-center gap-2 border-2 transition-all ${mode === WorkstationMode.VOICE ? 'bg-blue-600 border-blue-600' : 'bg-zinc-900 border-transparent text-zinc-500'}`}>
               <Mic2 size={20} strokeWidth={3} /><span className="text-[8px] font-black tracking-widest">VOICE</span>
             </button>
             <button onClick={toggleRecording} className={`py-5 rounded-2xl flex flex-col items-center gap-2 border-2 transition-all ${isRecording ? 'bg-red-600 border-red-600 animate-pulse' : 'bg-zinc-900 border-transparent text-zinc-500'}`}>
@@ -330,6 +372,7 @@ const App: React.FC = () => {
             </button>
           </section>
 
+          {/* Browser / History */}
           <div className="flex gap-4 mb-3 border-b border-white/5 px-2">
             <button onClick={() => setShowHistory(false)} className={`pb-2 text-[10px] font-black uppercase tracking-widest ${!showHistory ? 'text-purple-500 border-b-2 border-purple-500' : 'text-zinc-600'}`}>Browser</button>
             <button onClick={() => setShowHistory(true)} className={`pb-2 text-[10px] font-black uppercase tracking-widest ${showHistory ? 'text-purple-500 border-b-2 border-purple-500' : 'text-zinc-600'}`}>History ({sessions.length})</button>
@@ -337,97 +380,74 @@ const App: React.FC = () => {
 
           <div className="flex-1 overflow-y-auto no-scrollbar rounded-3xl bg-zinc-900/20 border border-white/5 p-4">
             {!showHistory ? (
-              <div className="space-y-8 pb-10">
-                <div className="bg-zinc-900/50 rounded-2xl p-4 border border-purple-500/20 mb-6">
-                  <div className="flex justify-between items-center mb-3">
-                    <div className="flex items-center gap-2"><Sparkles size={14} className="text-purple-500" /><span className="text-[10px] font-black uppercase tracking-widest text-purple-400">AI Studio Guide</span></div>
-                    <button onClick={fetchAiInsight} disabled={isAiLoading} className="text-[8px] font-black uppercase tracking-widest bg-purple-600 px-3 py-1 rounded-full disabled:opacity-50">{isAiLoading ? 'Analyzing...' : 'Get Tips'}</button>
-                  </div>
-                  {aiInsight && <p className="text-[10px] text-zinc-300 leading-relaxed italic">{aiInsight.text}</p>}
-                </div>
-                {Object.entries(groupedInstruments).map(([cat, insts]) => (
-                  <div key={cat} className="space-y-3">
-                    <h4 className="text-[8px] font-black text-zinc-700 tracking-[0.3em] uppercase">{cat}</h4>
-                    <div className="grid grid-cols-2 gap-2">
-                      {insts.map(inst => (
-                        <button key={inst.id} onClick={() => { setSelectedInstrument(inst); setAiInsight(null); }} className={`p-4 rounded-xl border-2 transition-all text-left flex flex-col h-20 justify-between ${selectedInstrument.id === inst.id ? 'bg-zinc-900 border-purple-600' : 'bg-zinc-900/30 border-transparent'}`}>
-                          <Music size={14} className={selectedInstrument.id === inst.id ? 'text-purple-500' : 'text-zinc-800'} />
-                          <span className={`text-[9px] font-bold uppercase tracking-tighter truncate ${selectedInstrument.id === inst.id ? 'text-white' : 'text-zinc-600'}`}>{inst.name}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+              <div className="grid grid-cols-2 gap-2">
+                {INSTRUMENTS.map(inst => (
+                  <button key={inst.id} onClick={() => setSelectedInstrument(inst)} className={`p-4 rounded-xl border-2 transition-all text-left flex flex-col h-20 justify-between ${selectedInstrument.id === inst.id ? 'bg-zinc-900 border-purple-600' : 'bg-zinc-900/30 border-transparent'}`}>
+                    <Music size={14} className={selectedInstrument.id === inst.id ? 'text-purple-500' : 'text-zinc-800'} />
+                    <span className={`text-[9px] font-bold uppercase tracking-tighter truncate ${selectedInstrument.id === inst.id ? 'text-white' : 'text-zinc-600'}`}>{inst.name}</span>
+                  </button>
                 ))}
               </div>
             ) : (
-              <div className="space-y-3 pb-10">
-                {sessions.map((s) => (
-                  <div key={s.id} className="p-4 bg-zinc-900/60 rounded-2xl border border-white/5">
-                    <div className="flex justify-between items-start mb-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center"><Layers size={14} className="text-purple-500/50" /></div>
-                        <div><p className="text-[9px] font-black text-purple-400 uppercase">{s.instrumentName}</p><p className="text-[8px] font-mono text-zinc-600">{new Date(s.timestamp).toLocaleTimeString()}</p></div>
-                      </div>
-                      <button onClick={() => setSessions(prev => prev.filter(x => x.id !== s.id))} className="text-zinc-800 p-1"><Trash2 size={14} /></button>
+              <div className="space-y-3">
+                {sessions.map(s => (
+                  <div key={s.id} className="p-4 bg-zinc-900/60 rounded-2xl border border-white/5 flex flex-col gap-3">
+                    <div className="flex justify-between">
+                       <span className="text-[9px] font-black text-purple-400 uppercase">{s.instrumentName}</span>
+                       <button onClick={() => setSessions(prev => prev.filter(x => x.id !== s.id))}><Trash2 size={14} className="text-zinc-800" /></button>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button onClick={() => playSessionMidi(s)} className="py-3 bg-black rounded-xl text-[9px] font-black uppercase tracking-widest flex items-center justify-center gap-2">
-                        {isPlayingBack === s.id + "_midi" ? <Square size={10} fill="white" /> : <Play size={10} fill="currentColor" />} MIDI
-                      </button>
-                      <button onClick={() => playSessionAudio(s)} className="py-3 bg-black rounded-xl text-[9px] font-black uppercase tracking-widest flex items-center justify-center gap-2">
-                        {isPlayingBack === s.id + "_audio" ? <Square size={10} fill="white" /> : <Volume2 size={10} />} AUDIO
-                      </button>
-                    </div>
+                    <button onClick={() => {
+                        const now = Tone.now();
+                        s.midiNotes.forEach(n => synthRef.current?.triggerAttackRelease(n.note, n.duration, now + n.time));
+                    }} className="py-2 bg-black rounded-lg text-[8px] font-bold">PLAY MIDI</button>
                   </div>
                 ))}
               </div>
             )}
           </div>
+
+          {/* Bottom Bar */}
+          <div className="fixed bottom-4 left-4 right-4 z-[60]">
+            <div className="bg-zinc-950/90 backdrop-blur-2xl border border-white/10 p-4 rounded-[2rem] flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${isRecording ? 'bg-red-600' : 'bg-purple-600'}`}>
+                  {isRecording ? <Disc size={20} className="animate-spin" /> : <Mic size={20} />}
+                </div>
+                <div>
+                  <p className="text-[9px] font-black uppercase text-zinc-500">{mode}</p>
+                  <p className="text-[10px] font-black tracking-widest">{currentMidiNote ? midiToNoteName(currentMidiNote) : '---'}</p>
+                </div>
+              </div>
+              <p className="text-3xl font-mono font-black italic text-purple-500 pr-4">{currentMidiNote ? midiToNoteName(currentMidiNote).replace(/\d/g, '') : '--'}</p>
+            </div>
+          </div>
         </main>
       )}
 
-      {isStarted && (
-        <div className="fixed bottom-4 left-4 right-4 z-[60]">
-          <div className="bg-zinc-950/90 backdrop-blur-2xl border border-white/10 p-4 rounded-[2rem] flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${isRecording ? 'bg-red-600' : 'bg-purple-600'}`}>
-                {isRecording ? <Disc size={20} className="animate-spin-slow" /> : <Mic size={20} />}
-              </div>
-              <div>
-                <p className="text-[9px] font-black uppercase text-zinc-500">{mode}</p>
-                <p className="text-[10px] font-black tracking-widest">{currentMidiNote ? midiToNoteName(currentMidiNote) : '---'}</p>
-              </div>
-            </div>
-            <p className="text-3xl font-mono font-black italic text-purple-500 pr-4">{currentMidiNote ? String(midiToNoteName(currentMidiNote)).replace(/\d+/g, '') : '--'}</p>
-          </div>
-        </div>
-      )}
-
+      {/* Settings Modal */}
       {showSettings && (
         <div className="absolute inset-0 z-[150] bg-black/90 flex items-center justify-center p-8 animate-in fade-in">
            <div className="w-full max-w-xs bg-zinc-900 p-8 rounded-[2.5rem] border border-white/10 relative">
               <button onClick={() => setShowSettings(false)} className="absolute top-6 right-6 p-2 bg-zinc-800 rounded-full"><XCircle size={18} /></button>
               <h3 className="text-lg font-black uppercase italic mb-8">Settings</h3>
               <div className="space-y-6">
-                <div className="space-y-2"><div className="flex justify-between text-[9px] font-black text-zinc-500 uppercase"><span>Sensitivity</span><span className="text-purple-500">{(sensitivity * 1000).toFixed(0)}</span></div><input type="range" min="0.001" max="0.1" step="0.001" value={sensitivity} onChange={(e) => setSensitivity(parseFloat(e.target.value))} className="w-full h-1 bg-zinc-800 rounded-lg appearance-none accent-purple-500" /></div>
-                <div className="space-y-2"><div className="flex justify-between text-[9px] font-black text-zinc-500 uppercase"><span>Gain</span><span className="text-purple-500">x{micBoost.toFixed(1)}</span></div><input type="range" min="1" max="10" step="0.5" value={micBoost} onChange={(e) => setMicBoost(parseFloat(e.target.value))} className="w-full h-1 bg-zinc-800 rounded-lg appearance-none accent-purple-500" /></div>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-[9px] font-black text-zinc-500 uppercase"><span>Sensitivity</span><span className="text-purple-500">{(sensitivity * 1000).toFixed(0)}</span></div>
+                  <input type="range" min="0.001" max="0.1" step="0.001" value={sensitivity} onChange={(e) => setSensitivity(parseFloat(e.target.value))} className="w-full h-1 bg-zinc-800 rounded-lg appearance-none accent-purple-500" />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-[9px] font-black text-zinc-500 uppercase"><span>Mic Gain</span><span className="text-purple-500">x{micBoost.toFixed(1)}</span></div>
+                  <input type="range" min="1" max="10" step="0.5" value={micBoost} onChange={(e) => setMicBoost(parseFloat(e.target.value))} className="w-full h-1 bg-zinc-800 rounded-lg appearance-none accent-purple-500" />
+                </div>
               </div>
            </div>
         </div>
       )}
 
-      {!isStarted && !isConfiguring && (
-        <div className="absolute inset-0 z-[100] bg-black flex flex-col items-center justify-center p-10">
-          <div className="w-24 h-24 bg-white text-black rounded-[2.2rem] flex items-center justify-center mb-10 rotate-3"><Music size={40} /></div>
-          <h2 className="text-5xl font-black mb-2 tracking-tighter uppercase italic leading-none text-center">Vocal<br/><span className="text-purple-500">Synth</span></h2>
-          <button onClick={startSetupWizard} className="w-full max-w-xs bg-white text-black py-7 rounded-[2rem] font-black text-xl flex items-center justify-center gap-3 mt-10">ENTER STUDIO <ChevronRight size={24} /></button>
-        </div>
-      )}
-
       <style>{`
-        @keyframes spin-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        .animate-spin-slow { animation: spin-slow 4s linear infinite; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .animate-spin { animation: spin 4s linear infinite; }
       `}</style>
     </div>
   );
