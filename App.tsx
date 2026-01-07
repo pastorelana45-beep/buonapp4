@@ -3,7 +3,7 @@ import * as Tone from 'tone';
 import { 
   Music, Settings, Mic, Play, Square, Volume2, Trash2, 
   Activity, Disc, History, AudioWaveform, Clock, 
-  ChevronRight, XCircle, VolumeX, Volume1, Layers, Mic2, Sparkles
+  ChevronRight, XCircle, Volume1, VolumeX, Layers, Mic2, Sparkles
 } from 'lucide-react';
 import { INSTRUMENTS } from './constants';
 import { Instrument, WorkstationMode, RecordedNote, StudioSession } from './types';
@@ -91,7 +91,6 @@ const App: React.FC = () => {
     };
     
     if (synthRef.current) {
-      // BUG FIX: Muto il synth se sto registrando o se il monitor è spento
       const shouldMute = isRecording || !isMonitorOn || (mode !== WorkstationMode.MIDI && mode !== WorkstationMode.RECORD);
       synthRef.current.volume.value = shouldMute ? -Infinity : 0;
     }
@@ -103,26 +102,30 @@ const App: React.FC = () => {
   useEffect(() => { applyInstrumentSettings(selectedInstrument); }, [selectedInstrument, applyInstrumentSettings]);
 
   const initAudioCore = async () => {
-    await Tone.start();
     if (synthRef.current) return true;
     try {
+      await Tone.start(); // Sblocco cruciale
       const synth = new Tone.PolySynth(Tone.Synth).toDestination();
       const mic = new Tone.UserMedia();
       const analyser = new Tone.Analyser('waveform', 1024);
       const recorder = new Tone.Recorder();
       const passthrough = new Tone.Gain(0).toDestination();
+      
       await mic.open();
       mic.connect(analyser);
       mic.connect(recorder);
       mic.connect(passthrough);
+      
       synthRef.current = synth;
       micRef.current = mic;
       analyserRef.current = analyser;
       recorderRef.current = recorder;
       voicePassthroughRef.current = passthrough;
+      
       applyInstrumentSettings(selectedInstrument);
       return true;
     } catch (err) {
+      console.error("Audio init error:", err);
       return false;
     }
   };
@@ -182,6 +185,20 @@ const App: React.FC = () => {
     requestAnimationFrame(audioLoop);
   };
 
+  const startSetupWizard = async () => {
+    setIsConfiguring(true);
+    setSetupStep('PERMISSION');
+    const success = await initAudioCore();
+    if (success) {
+      setSetupStep('COMPLETE');
+      audioLoop();
+    } else {
+      setIsConfiguring(false);
+      alert("Microphone access denied.");
+    }
+  };
+
+  // ... (Tutte le altre funzioni toggleRecording, playSessionMidi, etc rimangono uguali)
   const toggleRecording = async () => {
     if (!isRecording) {
       recordingNotesRef.current = [];
@@ -222,7 +239,6 @@ const App: React.FC = () => {
 
   const playSessionMidi = (session: StudioSession) => {
     if (isPlayingBack) stopAllPlayback();
-    // Applica lo strumento selezionato correntemente prima di suonare
     applyInstrumentSettings(selectedInstrument);
     setIsPlayingBack(session.id + "_midi");
     const now = Tone.now();
@@ -259,7 +275,7 @@ const App: React.FC = () => {
       const apiKey = (import.meta as any).env?.VITE_API_KEY || "";
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-      const result = await model.generateContent(`Tips for ${selectedInstrument.name}`);
+      const result = await model.generateContent(`Tips for playing ${selectedInstrument.name} with voice-to-midi`);
       const resp = await result.response;
       setAiInsight({ text: resp.text(), sources: [] });
     } catch (e) { console.error(e); } finally { setIsAiLoading(false); }
@@ -267,6 +283,7 @@ const App: React.FC = () => {
 
   return (
     <div className="fixed inset-0 bg-black text-white flex flex-col overflow-hidden font-sans select-none">
+      {/* Header, Main Content, Modals e Styles rimangono quelli che avevi */}
       <header className="px-6 py-4 flex justify-between items-center bg-zinc-950/80 backdrop-blur-md border-b border-white/5 z-50">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 bg-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-purple-900/20"><Music size={20} /></div>
@@ -415,7 +432,5 @@ const App: React.FC = () => {
     </div>
   );
 };
-
-const startSetupWizard = async () => {}; // Definito sopra nel componente
 
 export default App;
