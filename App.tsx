@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import * as Tone from 'tone';
 import { 
@@ -9,8 +8,8 @@ import {
 import { INSTRUMENTS } from './constants';
 import { Instrument, WorkstationMode, RecordedNote, StudioSession } from './types';
 import { detectPitch, frequencyToMidi, midiToNoteName } from './services/pitchDetection';
-// Import GoogleGenAI as required by the coding guidelines.
-import { GoogleGenAI } from "@google/genai";
+// Corretto il pacchetto ufficiale Google Generative AI
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const MIN_NOTE_DURATION = 0.05;
 
@@ -54,7 +53,8 @@ const App: React.FC = () => {
   
   const recordingNotesRef = useRef<RecordedNote[]>([]);
   const recordingStartTimeRef = useRef<number>(0);
-  const activeNoteStartRef = useRef<{ note: string, start: number } | null>(null);
+  // Aggiunto 'time' per coerenza con l'interfaccia RecordedNote
+  const activeNoteStartRef = useRef<{ note: string, start: number, time: number } | null>(null);
 
   const groupedInstruments = useMemo(() => {
     return INSTRUMENTS.reduce((acc, inst) => {
@@ -70,7 +70,6 @@ const App: React.FC = () => {
       lastMidi: currentMidiNote, sensitivity, micBoost, isMonitorOn
     };
     
-    // Gestione monitoraggio in tempo reale
     if (synthRef.current) {
       synthRef.current.volume.value = (isMonitorOn && (mode === WorkstationMode.MIDI || mode === WorkstationMode.RECORD)) ? 0 : -Infinity;
     }
@@ -179,16 +178,23 @@ const App: React.FC = () => {
         if (stateRef.current.lastMidi !== null) {
           synthRef.current.triggerRelease(midiToNoteName(stateRef.current.lastMidi));
           if (currentMode === WorkstationMode.RECORD && activeNoteStartRef.current) {
-            const duration = Tone.now() - recordingStartTimeRef.current - activeNoteStartRef.current.start;
+            const now = Tone.now();
+            const duration = now - recordingStartTimeRef.current - activeNoteStartRef.current.start;
             if (duration >= MIN_NOTE_DURATION) {
-              recordingNotesRef.current.push({ ...activeNoteStartRef.current, duration });
+              recordingNotesRef.current.push({ 
+                note: activeNoteStartRef.current.note,
+                start: activeNoteStartRef.current.start,
+                duration: duration,
+                time: activeNoteStartRef.current.time
+              });
             }
           }
         }
         synthRef.current.triggerAttack(noteName);
         setCurrentMidiNote(midi);
         if (currentMode === WorkstationMode.RECORD) {
-          activeNoteStartRef.current = { note: noteName, start: Tone.now() - recordingStartTimeRef.current, duration: 0 };
+          const startTime = Tone.now() - recordingStartTimeRef.current;
+          activeNoteStartRef.current = { note: noteName, start: startTime, time: startTime };
         }
       }
     } else if (stateRef.current.lastMidi !== null) {
@@ -196,7 +202,12 @@ const App: React.FC = () => {
       if (currentMode === WorkstationMode.RECORD && activeNoteStartRef.current) {
         const duration = Tone.now() - recordingStartTimeRef.current - activeNoteStartRef.current.start;
         if (duration >= MIN_NOTE_DURATION) {
-          recordingNotesRef.current.push({ ...activeNoteStartRef.current, duration });
+          recordingNotesRef.current.push({ 
+            note: activeNoteStartRef.current.note,
+            start: activeNoteStartRef.current.start,
+            duration: duration,
+            time: activeNoteStartRef.current.time
+          });
         }
         activeNoteStartRef.current = null;
       }
@@ -219,7 +230,14 @@ const App: React.FC = () => {
       const url = URL.createObjectURL(audioBlob);
       if (activeNoteStartRef.current) {
         const duration = Tone.now() - recordingStartTimeRef.current - activeNoteStartRef.current.start;
-        if (duration >= MIN_NOTE_DURATION) recordingNotesRef.current.push({ ...activeNoteStartRef.current, duration });
+        if (duration >= MIN_NOTE_DURATION) {
+          recordingNotesRef.current.push({ 
+            note: activeNoteStartRef.current.note,
+            start: activeNoteStartRef.current.start,
+            duration: duration,
+            time: activeNoteStartRef.current.time
+          });
+        }
       }
       setSessions(prev => [{
         id: Math.random().toString(36).substr(2, 9),
@@ -242,7 +260,7 @@ const App: React.FC = () => {
     session.midiNotes.forEach(n => {
       synthRef.current?.triggerAttackRelease(n.note, n.duration, now + n.time);
     });
-    setTimeout(() => setIsPlayingBack(null), 5000); // Semplificato
+    setTimeout(() => setIsPlayingBack(null), 5000); 
   };
 
   const playSessionAudio = (session: StudioSession) => {
@@ -262,27 +280,21 @@ const App: React.FC = () => {
     setIsPlayingBack(null);
   };
 
-  /**
-   * Gemini Insight Function: Fetches pro studio insights for the selected instrument.
-   * Utilizes Gemini 3 Flash with Google Search grounding.
-   */
   const fetchAiInsight = async () => {
     setIsAiLoading(true);
     setAiInsight(null);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: `Provide 3 concise professional studio recording and mixing tips for ${selectedInstrument.name}. Focus on modern sound production.`,
-        config: {
-          tools: [{ googleSearch: {} }]
-        }
-      });
+      // In Vite, usa import.meta.env.VITE_API_KEY se process.env non è configurato
+      const apiKey = (import.meta as any).env?.VITE_API_KEY || "";
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
       
-      const text = response.text || "No insights found.";
-      const chunks = (response.candidates?.[0]?.groundingMetadata?.groundingChunks || []) as any[];
+      const prompt = `Provide 3 concise professional studio recording and mixing tips for ${selectedInstrument.name}. Focus on modern sound production.`;
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
       
-      setAiInsight({ text, sources: chunks });
+      setAiInsight({ text, sources: [] });
     } catch (e) {
       console.error("Gemini Insight Error:", e);
     } finally {
@@ -342,7 +354,6 @@ const App: React.FC = () => {
       {isStarted && (
         <main className="flex-1 flex flex-col px-5 pb-24 overflow-hidden">
           
-          {/* 3 MODALITÀ GRID */}
           <section className="grid grid-cols-3 gap-3 my-5 shrink-0">
             <button 
               onClick={() => { setMode(WorkstationMode.MIDI); stopAllPlayback(); }}
@@ -367,7 +378,6 @@ const App: React.FC = () => {
             </button>
           </section>
 
-          {/* TABS BROWSER / ARCHIVE */}
           <div className="flex gap-4 mb-3 border-b border-white/5 px-2">
             <button onClick={() => setShowHistory(false)} className={`pb-2 text-[10px] font-black uppercase tracking-widest ${!showHistory ? 'text-purple-500 border-b-2 border-purple-500' : 'text-zinc-600'}`}>Browser</button>
             <button onClick={() => setShowHistory(true)} className={`pb-2 text-[10px] font-black uppercase tracking-widest ${showHistory ? 'text-purple-500 border-b-2 border-purple-500' : 'text-zinc-600'}`}>History ({sessions.length})</button>
@@ -376,7 +386,6 @@ const App: React.FC = () => {
           <div className="flex-1 overflow-y-auto no-scrollbar rounded-3xl bg-zinc-900/20 border border-white/5 p-4">
             {!showHistory ? (
               <div className="space-y-8 pb-10">
-                {/* AI INSIGHT SECTION IN BROWSER */}
                 <div className="bg-zinc-900/50 rounded-2xl p-4 border border-purple-500/20 mb-6">
                   <div className="flex justify-between items-center mb-3">
                     <div className="flex items-center gap-2">
@@ -394,18 +403,6 @@ const App: React.FC = () => {
                   {aiInsight ? (
                     <div className="space-y-3">
                       <p className="text-[10px] text-zinc-300 leading-relaxed italic">{aiInsight.text}</p>
-                      {aiInsight.sources.length > 0 && (
-                        <div className="pt-2 border-t border-white/5">
-                          <p className="text-[7px] font-black text-zinc-500 uppercase tracking-widest mb-1">Sources:</p>
-                          <div className="flex flex-wrap gap-2">
-                            {aiInsight.sources.map((chunk, idx) => chunk.web && (
-                              <a key={idx} href={chunk.web.uri} target="_blank" rel="noreferrer" className="text-[7px] text-purple-400 flex items-center gap-1 hover:underline">
-                                {chunk.web.title || 'Link'} <ExternalLink size={8} />
-                              </a>
-                            ))}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   ) : (
                     <p className="text-[8px] text-zinc-600 uppercase tracking-widest text-center py-2 font-bold">Select an instrument for studio tips</p>
@@ -433,8 +430,7 @@ const App: React.FC = () => {
             ) : (
               <div className="space-y-3 pb-10">
                 {sessions.length === 0 && <p className="text-center py-10 text-[10px] text-zinc-700 font-bold uppercase tracking-widest">Archive Empty</p>}
-                {/* FIX: Explicitly cast sessions to StudioSession[] to prevent 'unknown' type error in map iterator */}
-                {(sessions as StudioSession[]).map((s: StudioSession) => (
+                {(sessions as StudioSession[]).map((s) => (
                   <div key={s.id} className="p-4 bg-zinc-900/60 rounded-2xl border border-white/5">
                     <div className="flex justify-between items-start mb-4">
                       <div className="flex items-center gap-3">
@@ -503,18 +499,11 @@ const App: React.FC = () => {
                   <div className="flex justify-between text-[9px] font-black uppercase text-zinc-500"><span>Gain Boost</span><span className="text-purple-500">x{micBoost.toFixed(1)}</span></div>
                   <input type="range" min="1" max="10" step="0.5" value={micBoost} onChange={(e) => setMicBoost(parseFloat(e.target.value))} className="w-full h-1 bg-zinc-800 rounded-lg appearance-none accent-purple-500" />
                 </div>
-                <div className="pt-4 flex items-center justify-between border-t border-white/5">
-                   <div className="text-[9px] font-black uppercase text-zinc-500">Monitor Output</div>
-                   <button onClick={() => setIsMonitorOn(!isMonitorOn)} className={`px-4 py-2 rounded-full text-[9px] font-black uppercase ${isMonitorOn ? 'bg-zinc-800 text-zinc-500' : 'bg-emerald-500 text-black'}`}>
-                     {isMonitorOn ? 'Default' : 'Bluetooth'}
-                   </button>
-                </div>
               </div>
            </div>
         </div>
       )}
 
-      {/* SPLASH SCREEN */}
       {!isStarted && !isConfiguring && (
         <div className="absolute inset-0 z-[100] bg-black flex flex-col items-center justify-center p-10 animate-in fade-in duration-700">
           <div className="w-24 h-24 bg-white text-black rounded-[2.2rem] flex items-center justify-center shadow-2xl mb-10 rotate-3 transition-transform">
