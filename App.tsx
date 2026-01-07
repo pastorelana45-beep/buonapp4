@@ -8,7 +8,6 @@ import {
 import { INSTRUMENTS } from './constants';
 import { Instrument, WorkstationMode, RecordedNote, StudioSession } from './types';
 import { detectPitch, frequencyToMidi, midiToNoteName } from './services/pitchDetection';
-// Corretto il pacchetto ufficiale Google Generative AI
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const MIN_NOTE_DURATION = 0.05;
@@ -30,7 +29,6 @@ const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
-  // Gemini state for sound design insights
   const [aiInsight, setAiInsight] = useState<{ text: string; sources: any[] } | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
 
@@ -53,7 +51,8 @@ const App: React.FC = () => {
   
   const recordingNotesRef = useRef<RecordedNote[]>([]);
   const recordingStartTimeRef = useRef<number>(0);
-  // Aggiunto 'time' per coerenza con l'interfaccia RecordedNote
+  
+  // Aggiunta la proprietà 'start' per il calcolo interno della durata
   const activeNoteStartRef = useRef<{ note: string, start: number, time: number } | null>(null);
 
   const groupedInstruments = useMemo(() => {
@@ -182,10 +181,9 @@ const App: React.FC = () => {
             const duration = now - recordingStartTimeRef.current - activeNoteStartRef.current.start;
             if (duration >= MIN_NOTE_DURATION) {
               recordingNotesRef.current.push({ 
-                note: activeNoteStartRef.current.note,
-                start: activeNoteStartRef.current.start,
-                duration: duration,
-                time: activeNoteStartRef.current.time
+                note: activeNoteStartRef.current.note, 
+                time: activeNoteStartRef.current.time, 
+                duration 
               });
             }
           }
@@ -203,10 +201,9 @@ const App: React.FC = () => {
         const duration = Tone.now() - recordingStartTimeRef.current - activeNoteStartRef.current.start;
         if (duration >= MIN_NOTE_DURATION) {
           recordingNotesRef.current.push({ 
-            note: activeNoteStartRef.current.note,
-            start: activeNoteStartRef.current.start,
-            duration: duration,
-            time: activeNoteStartRef.current.time
+            note: activeNoteStartRef.current.note, 
+            time: activeNoteStartRef.current.time, 
+            duration 
           });
         }
         activeNoteStartRef.current = null;
@@ -232,10 +229,9 @@ const App: React.FC = () => {
         const duration = Tone.now() - recordingStartTimeRef.current - activeNoteStartRef.current.start;
         if (duration >= MIN_NOTE_DURATION) {
           recordingNotesRef.current.push({ 
-            note: activeNoteStartRef.current.note,
-            start: activeNoteStartRef.current.start,
-            duration: duration,
-            time: activeNoteStartRef.current.time
+            note: activeNoteStartRef.current.note, 
+            time: activeNoteStartRef.current.time, 
+            duration 
           });
         }
       }
@@ -260,7 +256,7 @@ const App: React.FC = () => {
     session.midiNotes.forEach(n => {
       synthRef.current?.triggerAttackRelease(n.note, n.duration, now + n.time);
     });
-    setTimeout(() => setIsPlayingBack(null), 5000); 
+    setTimeout(() => setIsPlayingBack(null), 5000);
   };
 
   const playSessionAudio = (session: StudioSession) => {
@@ -284,19 +280,16 @@ const App: React.FC = () => {
     setIsAiLoading(true);
     setAiInsight(null);
     try {
-      // In Vite, usa import.meta.env.VITE_API_KEY se process.env non è configurato
+      // Nota: In Vite si usa import.meta.env invece di process.env
       const apiKey = (import.meta as any).env?.VITE_API_KEY || "";
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
       
-      const prompt = `Provide 3 concise professional studio recording and mixing tips for ${selectedInstrument.name}. Focus on modern sound production.`;
-      const result = await model.generateContent(prompt);
+      const result = await model.generateContent(`Provide 3 concise professional studio recording and mixing tips for ${selectedInstrument.name}.`);
       const response = await result.response;
-      const text = response.text();
-      
-      setAiInsight({ text, sources: [] });
+      setAiInsight({ text: response.text(), sources: [] });
     } catch (e) {
-      console.error("Gemini Insight Error:", e);
+      console.error("Gemini Error:", e);
     } finally {
       setIsAiLoading(false);
     }
@@ -305,7 +298,6 @@ const App: React.FC = () => {
   return (
     <div className="fixed inset-0 bg-black text-white flex flex-col overflow-hidden font-sans select-none">
       
-      {/* HEADER */}
       <header className="px-6 py-4 flex justify-between items-center bg-zinc-950/80 backdrop-blur-md border-b border-white/5 z-50">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 bg-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-purple-900/20">
@@ -331,14 +323,12 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* VOLUME BAR */}
       {isStarted && (
         <div className="w-full h-1 bg-zinc-900 overflow-hidden">
           <div className="h-full bg-purple-500 transition-all duration-75" style={{ width: `${Math.min(100, (rmsVolume / 0.3) * 100)}%` }} />
         </div>
       )}
 
-      {/* SETUP WIZARD */}
       {isConfiguring && (
         <div className="absolute inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-10 text-center animate-in fade-in">
           <Mic size={48} className="text-purple-500 animate-pulse mb-6" />
@@ -350,10 +340,8 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* MAIN CONTENT */}
       {isStarted && (
         <main className="flex-1 flex flex-col px-5 pb-24 overflow-hidden">
-          
           <section className="grid grid-cols-3 gap-3 my-5 shrink-0">
             <button 
               onClick={() => { setMode(WorkstationMode.MIDI); stopAllPlayback(); }}
@@ -395,18 +383,12 @@ const App: React.FC = () => {
                     <button 
                       onClick={fetchAiInsight} 
                       disabled={isAiLoading}
-                      className="text-[8px] font-black uppercase tracking-widest bg-purple-600 px-3 py-1 rounded-full disabled:opacity-50 transition-all hover:bg-purple-500 active:scale-95"
+                      className="text-[8px] font-black uppercase tracking-widest bg-purple-600 px-3 py-1 rounded-full disabled:opacity-50"
                     >
                       {isAiLoading ? 'Analyzing...' : 'Get Tips'}
                     </button>
                   </div>
-                  {aiInsight ? (
-                    <div className="space-y-3">
-                      <p className="text-[10px] text-zinc-300 leading-relaxed italic">{aiInsight.text}</p>
-                    </div>
-                  ) : (
-                    <p className="text-[8px] text-zinc-600 uppercase tracking-widest text-center py-2 font-bold">Select an instrument for studio tips</p>
-                  )}
+                  {aiInsight && <p className="text-[10px] text-zinc-300 leading-relaxed italic">{aiInsight.text}</p>}
                 </div>
 
                 {Object.entries(groupedInstruments).map(([cat, insts]) => (
@@ -429,8 +411,8 @@ const App: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-3 pb-10">
-                {sessions.length === 0 && <p className="text-center py-10 text-[10px] text-zinc-700 font-bold uppercase tracking-widest">Archive Empty</p>}
-                {(sessions as StudioSession[]).map((s) => (
+                {sessions.length === 0 && <p className="text-center py-10 text-[10px] text-zinc-700 font-bold uppercase">Archive Empty</p>}
+                {sessions.map((s) => (
                   <div key={s.id} className="p-4 bg-zinc-900/60 rounded-2xl border border-white/5">
                     <div className="flex justify-between items-start mb-4">
                       <div className="flex items-center gap-3">
@@ -458,7 +440,6 @@ const App: React.FC = () => {
         </main>
       )}
 
-      {/* DASHBOARD BAR */}
       {isStarted && (
         <div className="fixed bottom-4 left-4 right-4 z-[60]">
           <div className="bg-zinc-950/90 backdrop-blur-2xl border border-white/10 p-4 rounded-[2rem] flex items-center justify-between shadow-2xl">
@@ -484,7 +465,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* SETTINGS MODAL */}
       {showSettings && (
         <div className="absolute inset-0 z-[150] bg-black/90 backdrop-blur-xl flex items-center justify-center p-8 animate-in fade-in zoom-in duration-200">
            <div className="w-full max-w-xs bg-zinc-900 p-8 rounded-[2.5rem] border border-white/10 relative shadow-2xl">
